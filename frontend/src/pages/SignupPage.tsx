@@ -44,7 +44,7 @@ export default function SignupPage() {
   return (
     <AuthLayout heading="간단하게 회원가입하고" subheading="">
       <h2 className="auth-title">회원가입</h2>
-      <p className="auth-subtitle">AutoDeploy와 함께 혁신적인 배포 자동화를 시작하세요.</p>
+      <p className="auth-subtitle">AutoShip과 함께 혁신적인 배포 자동화를 시작하세요.</p>
       
       <form onSubmit={handleSignup} className="auth-form">
         <div className="form-group">

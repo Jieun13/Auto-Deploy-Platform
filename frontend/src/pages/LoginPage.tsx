@@ -42,7 +42,7 @@ export default function LoginPage() {
   return (
     <AuthLayout heading="지금 바로 로그인하고" subheading="">
       <h2 className="auth-title">로그인</h2>
-      <p className="auth-subtitle">AutoDeploy와 함께 혁신적인 배포 자동화를 시작하세요.</p>
+      <p className="auth-subtitle">AutoShip과 함께 혁신적인 배포 자동화를 시작하세요.</p>
       
       <form onSubmit={handleLogin} className="auth-form">
         <div className="form-group">

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import Header from '../components/Header';
 import { Github, Clock, Globe, ArrowLeft, RefreshCw, Square } from 'lucide-react';
@@ -23,7 +23,7 @@ const MOCK_PROJECT_DATA = {
     { label: 'Git Clone', status: '완료' },
     { label: 'Dockerfile 빌드 준비', status: '완료' },
     { label: 'Docker Build', status: '실패' },
-    { label: 'App Runner 배포 적용', status: '대기' },
+    { label: 'ECS 배포 적용', status: '대기' },
   ],
   aiSummary: {
     statusType: 'error', // success, error, info
@@ -57,6 +57,8 @@ export default function ProjectDetailPage() {
   const [data, setData] = useState<typeof MOCK_PROJECT_DATA | null>(null);
 
   useEffect(() => {
+    let timeoutId: ReturnType<typeof setTimeout>;
+
     const fetchProjectDetails = async () => {
       const token = localStorage.getItem('token');
       if (!token) {
@@ -67,22 +69,63 @@ export default function ProjectDetailPage() {
 
       try {
         const API_URL = import.meta.env.VITE_API_URL || 'https://6322si78va.execute-api.ap-northeast-2.amazonaws.com/default';
-        const response = await fetch(`${API_URL}/projects/${projectId}`, {
-          headers: {
-            'Authorization': `Bearer ${token}`
-          }
-        });
+        const headers = { 'Authorization': `Bearer ${token}` };
 
-        if (response.ok) {
-          const resData = await response.json();
+        const [projectRes, metricsRes, logsRes] = await Promise.all([
+          fetch(`${API_URL}/projects/${projectId}`, { headers }),
+          fetch(`${API_URL}/projects/${projectId}/metrics`, { headers }).catch(() => null),
+          fetch(`${API_URL}/projects/${projectId}/logs`, { headers }).catch(() => null)
+        ]);
+
+        if (projectRes.ok) {
+          const resData = await projectRes.json();
           const p = resData.project;
+
+          // 메트릭 데이터 파싱
+          let cpuVal = '-';
+          let memoryVal = '-';
+          if (metricsRes && metricsRes.ok) {
+            const mData = await metricsRes.json().catch(() => ({}));
+            if (mData.cpu && mData.cpu.length > 0) {
+              cpuVal = `${mData.cpu[mData.cpu.length - 1].value}%`;
+            }
+            if (mData.memory && mData.memory.length > 0) {
+              memoryVal = `${mData.memory[mData.memory.length - 1].value} MB`;
+            }
+          }
+
+          // 로그 데이터 파싱
+          let logsArr: { text: string; type: 'normal' | 'error' | 'success' }[] = [];
+          if (logsRes) {
+            if (logsRes.ok) {
+              const lData = await logsRes.json().catch(() => ({}));
+              if (lData.logs && Array.isArray(lData.logs)) {
+                logsArr = lData.logs.map((logStr: string) => {
+                  const lower = logStr.toLowerCase();
+                  let type: 'normal' | 'error' | 'success' = 'normal';
+                  if (lower.includes('error') || lower.includes('fail') || lower.includes('exception') || lower.includes('nullpointer')) type = 'error';
+                  else if (lower.includes('success')) type = 'success';
+                  return { text: logStr, type };
+                });
+              } else {
+                 logsArr = [{ text: '로그 내역이 없습니다.', type: 'normal' }];
+              }
+            } else if (logsRes.status === 404) {
+              const lData = await logsRes.json().catch(() => ({}));
+              logsArr = [{ text: lData.message || '로그를 찾을 수 없습니다.', type: 'normal' }];
+            } else {
+              logsArr = [{ text: '로그를 불러오는 데 실패했습니다.', type: 'error' }];
+            }
+          } else {
+            logsArr = [{ text: '로그 데이터를 가져올 수 없습니다.', type: 'error' }];
+          }
 
           // 상태 기반 스텝 생성
           const generateSteps = (status: string) => {
             const steps = [
               { label: '요청 접수', status: '대기' },
               { label: 'CodeBuild (빌드)', status: '대기' },
-              { label: 'App Runner 배포', status: '대기' },
+              { label: 'ECS 배포', status: '대기' },
               { label: '배포 완료', status: '대기' }
             ];
 
@@ -143,9 +186,19 @@ export default function ProjectDetailPage() {
             currentStatus: p.status,
             steps: generateSteps(p.status),
             aiSummary: getAiSummaryObj(p.status, p.aiSummary, p.errorMessage),
-            resources: MOCK_PROJECT_DATA.resources, // 리소스 사용량은 일단 목업 유지
-            logs: MOCK_PROJECT_DATA.logs // 로그 내역도 일단 목업 유지
+            resources: {
+              cpu: cpuVal,
+              memory: memoryVal,
+              disk: '-' // 디스크 모니터링은 현재 API에 없으므로 기본값
+            },
+            logs: logsArr
           });
+
+          // 상태가 진행 중인 경우 5초 뒤 다시 호출하여 폴링 (Polling)
+          if (p.status === 'PENDING' || p.status === 'BUILDING' || p.status === 'DEPLOYING') {
+            timeoutId = setTimeout(fetchProjectDetails, 5000);
+          }
+
         } else {
           console.error('프로젝트 상세 조회 실패');
           alert('프로젝트를 찾을 수 없거나 권한이 없습니다.');
@@ -159,6 +212,10 @@ export default function ProjectDetailPage() {
     if (projectId) {
       fetchProjectDetails();
     }
+
+    return () => {
+      if (timeoutId) clearTimeout(timeoutId);
+    };
   }, [projectId, navigate]);
 
   if (!data) {
@@ -240,7 +297,7 @@ export default function ProjectDetailPage() {
 
           {/* 시스템 리소스 */}
           <div className="panel span-4">
-            <h2 className="panel-header">리소스 사용량 (App Runner)</h2>
+            <h2 className="panel-header">리소스 사용량 (ECS)</h2>
             <div className="resource-list">
               <div className="resource-item">
                 <span className="resource-label">CPU 사용량</span>
