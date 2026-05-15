@@ -18,64 +18,120 @@
 
 ### **솔루션**
 
-AutoDeploy Platform은 GitHub Repository URL과 프레임워크 종류만 입력하면 나머지 빌드, 배포 과정을 AWS 네이티브 서비스로 완전 자동화합니다.
+AutoDeploy Platform은 GitHub Repository URL과 프레임워크 종류만 입력하면 사용자의 애플리케이션을 자동으로 컨테이너화하고, AWS 기반 배포 파이프라인을 통해 실행 환경까지 구성합니다.
 
 | 문제 | 솔루션 |
 | --- | --- |
-| 인프라 설정 복잡성 | AWS App Runner로 서버 관리 Zero화 |
+| 인프라 설정 복잡성 | ECS Express Mode를 활용해 사용자 애플리케이션 실행 환경 자동 구성 |
 | Dockerfile 작성 부담 | CodeBuild에서 프레임워크별 Dockerfile 동적 자동 생성 |
-| 배포 파이프라인 부재 | CodeBuild → ECR → App Runner 자동 파이프라인 |
-| 운영 모니터링 부재 | CloudWatch Metrics 연동 실시간 CPU/Memory 대시보드 |
+| 배포 파이프라인 부재 | CodeBuild → ECR → ECS Express Mode 자동 배포 파이프라인 |
+| 운영 모니터링 부재 | CloudWatch Metrics 연동 CPU/Memory 대시보드 |
 | 에러 원인 파악 어려움 | Amazon Bedrock이 에러 로그를 한국어로 자동 요약 |
 
 ---
 
 ## **서비스 시스템 아키텍처**
+
+AutoDeploy Platform 자체는 AWS 관리형/서버리스 서비스를 중심으로 구성됩니다.
+사용자가 배포한 애플리케이션은 CodeBuild로 컨테이너 이미지가 생성되고, ECR에 저장된 뒤 ECS Express Mode에서 실행됩니다.
+
 ### **전체 아키텍처 다이어그램**
 ![architecture](architecture.jpeg)
 ### **핵심 서비스 구성 요소**
 
 | AWS 서비스 | 역할 |
 | --- | --- |
-| **S3 + CloudFront** | React 프론트엔드 정적 파일 호스팅 및 글로벌 CDN 배포 |
-| **AppSync** | GraphQL API 제공 + DynamoDB 변경을 감지하여 React에 실시간 상태 Push (GraphQL Subscription) |
+| **S3 + CloudFront** | React 프론트엔드 정적 파일 호스팅 및 CDN 배포 |
+| **Amazon API Gateway** | 프론트엔드의 로그인, 프로젝트 생성, 프로젝트 조회, 메트릭 조회 요청을 Lambda로 전달 |
 | **AWS Lambda** | 핵심 비즈니스 로직 처리 (배포 요청, 상태 조회, AI 호출) |
-| **AWS CodeBuild** | GitHub 소스 Clone → 프레임워크별 Dockerfile 동적 생성 → Docker 이미지 빌드 |
-| **AWS ECR** | CodeBuild가 생성한 Docker 이미지 저장소 |
-| **AWS App Runner** | ECR 이미지를 기반으로 컨테이너를 실행하고 공개 URL을 자동 발급 |
-| **Amazon DynamoDB** | 프로젝트 메타데이터, 빌드 상태, AI 요약 결과를 저장하는 NoSQL DB |
-| **Amazon CloudWatch** | App Runner의 CPU/Memory 메트릭 수집 및 CodeBuild 빌드 로그 저장 |
-| **Amazon Bedrock** | 빌드/배포 실패 시 CloudWatch 에러 로그를 Claude 모델로 분석 후 한국어 요약 |
+| **AWS CodeBuild** | GitHub Repository Clone → 프레임워크별 Dockerfile 동적 생성 → Docker 이미지 빌드 |
+| **Amazon ECR** | CodeBuild가 생성한 Docker 이미지 저장소 |
+| **Amazon ECS Express Mode** | ECR 이미지를 기반으로 사용자의 애플리케이션 컨테이너 실행 |
+| **Amazon DynamoDB** | 사용자 정보, 프로젝트 메타데이터, 빌드/배포 상태, ECS 서비스 정보, AI 요약 결과 저장 |
+| **Amazon CloudWatch** | CodeBuild 빌드 로그, ECS 실행 로그, ECS CPU/Memory 메트릭 수집 |
+| **Amazon Bedrock** | 빌드/배포 실패 로그를 Claude 모델로 분석하여 한국어 요약 생성 |
+| **Amazon EventBridge** | CodeBuild 및 ECS 상태 변경 이벤트를 Webhook Lambda로 전달 |
 
 
 ### **주요 워크플로우**
 
 ```
-[1] 배포 요청
-    사용자 → (GitHub URL, Framework 선택) → Frontend → AppSync
-    → Lambda: DynamoDB에 status: PENDING 기록 + CodeBuild 실행 트리거
+[1] 로그인 및 사용자 인증
+    사용자 → Frontend → API Gateway → API Lambda
+    → 이메일/비밀번호 기반 로그인 또는 자동 회원가입
+    → JWT 발급
+    → 이후 프로젝트 조회 요청 시 Authorization Bearer 토큰으로 사용자 검증
 
-[2] 자동 빌드 (CodeBuild)
+[2] 배포 요청 생성
+    사용자 → (GitHub URL, 프로젝트명, Framework 선택) → Frontend → API Gateway
+    → Project Create Lambda
+    → DynamoDB에 프로젝트 정보 저장
+       status: PENDING
+    → CodeBuild 실행 트리거
+
+[3] 자동 빌드
+    CodeBuild
     → GitHub Repository Clone
     → 선택된 Framework에 맞는 Dockerfile 동적 생성
-      (예: Spring Boot → JDK 이미지 기반 멀티스테이지 빌드 스크립트 자동 작성)
-    → Docker Build & AWS ECR에 이미지 Push
+      예: spring, node, react, django, flask
+    → Docker 이미지 빌드
+    → ECR에 이미지 Push
 
-[3] 자동 배포 (App Runner)
-    → ECR에 새 이미지 Push 감지
-    → App Runner가 컨테이너를 실행하고 공개 URL 자동 발급
+[4] 빌드 상태 처리
+    CodeBuild 상태 변경 이벤트 발생
+    → EventBridge
+    → Webhook Lambda
 
-[4] 상태 동기화 (AppSync)
-    → CodeBuild / App Runner의 상태 변경 이벤트 발생
-    → App Runner → Lambda (배포 완료 알림/트리거)
-    → Lambda가 DynamoDB 업데이트
-    → DynamoDB 변경을 AppSync가 감지
-    → AppSync가 React에 GraphQL Subscription으로 실시간 Push
+    IN_PROGRESS:
+      → DynamoDB status를 BUILDING으로 변경
 
-[5] 사용자 확인
-    → Frontend에서 실시간 상태 확인
-    → SUCCESS: 배포 URL 제공 + CPU/Memory 모니터링 차트
-    → FAILED: AI가 분석한 에러 원인 한국어 텍스트 표시
+    SUCCEEDED:
+      → DynamoDB status를 DEPLOYING으로 변경
+      → ECR 이미지 URI를 기반으로 ECS Express Mode 서비스 생성
+
+    FAILED:
+      → DynamoDB status를 FAILED로 변경
+      → Bedrock Summary Lambda 비동기 호출
+
+[5] 사용자 애플리케이션 자동 배포
+    Webhook Lambda
+    → ECS Express Mode 서비스 생성
+    → 서비스 이름 deploy-{projectId} 생성
+    → DynamoDB에 ecsServiceName 저장
+    → ECS에서 사용자 애플리케이션 컨테이너 실행
+
+[6] ECS 배포 상태 처리
+    ECS 상태 변경 이벤트 발생
+    → EventBridge
+    → Webhook Lambda
+
+    SERVICE_STEADY_STATE 또는 RUNNING:
+      → DynamoDB status를 SUCCESS로 변경
+      → 배포 URL 저장
+
+    SERVICE_DEPLOYMENT_FAILED / TASKS_STOPPED / STOPPED:
+      → DynamoDB status를 FAILED로 변경
+      → Bedrock Summary Lambda 비동기 호출
+
+[7] 실패 로그 분석
+    빌드 또는 배포 실패 발생
+    → Webhook Lambda가 logGroup, logStream, failType을 Bedrock Summary Lambda로 전달
+    → Bedrock Summary Lambda가 CloudWatch 로그 조회
+    → Bedrock Claude 모델로 실패 원인 분석
+    → DynamoDB에 aiSummary 저장
+
+[8] 사용자 확인
+    Frontend
+    → API Gateway
+    → API Lambda로 프로젝트 목록/상세 상태 조회
+    → Metrics Lambda로 ECS CPU/Memory 메트릭 조회
+
+    SUCCESS:
+      → 배포 URL 제공
+      → CPU/Memory 모니터링 차트 표시
+
+    FAILED:
+      → AI가 분석한 에러 원인 한국어 텍스트 표시
 ```
 
 
@@ -95,13 +151,15 @@ AutoDeploy Platform은 GitHub Repository URL과 프레임워크 종류만 입력
 - ECR 이미지 저장 및 관리  
 
 ### 👤 백지은 — 배포 & 상태 관리
-- App Runner 기반 자동 배포 구성  
-- DynamoDB 상태 관리 및 이벤트 처리  
-- Lambda를 통한 배포 상태 흐름 관리  
+- ECS Express Mode 기반 사용자 애플리케이션 자동 배포 구성  
+- EventBridge 기반 CodeBuild/ECS 상태 이벤트 처리  
+- DynamoDB 상태 관리 및 ECS 서비스 정보 저장  
+- Lambda를 통한 빌드/배포 상태 흐름 관리  
 
 ### 👤 이승현 — 모니터링 & AI + 프론트
-- CloudWatch 기반 메트릭 및 로그 조회 기능 구현  
-- Bedrock을 활용한 에러 로그 분석  
+- API Gateway 기반 로그인/프로젝트 조회 API 연동  
+- CloudWatch 기반 ECS CPU/Memory 메트릭 조회 기능 구현  
+- Bedrock을 활용한 빌드/배포 실패 로그 분석  
 - React UI 및 사용자 인터페이스 개발  
 
 ### 🤝 공통 작업
